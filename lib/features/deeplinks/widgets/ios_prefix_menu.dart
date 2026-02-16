@@ -27,7 +27,6 @@ class IosPrefixMenu extends StatelessWidget {
 
         items.add(const PopupMenuDivider());
 
-        // existing prefixes
         for (final p in controller.iosPrefixes) {
           items.add(
             PopupMenuItem<_PrefixAction>(
@@ -58,20 +57,6 @@ class IosPrefixMenu extends StatelessWidget {
           ),
         );
 
-        items.add(
-          PopupMenuItem<_PrefixAction>(
-            value: const _PrefixAction.delete(),
-            enabled: controller.iosPrefixes.length > 1,
-            child: const Row(
-              children: [
-                Icon(Icons.delete_outline, size: 18),
-                SizedBox(width: 8),
-                Text('Удалить prefix…'),
-              ],
-            ),
-          ),
-        );
-
         return items;
       },
       onSelected: (action) async {
@@ -85,15 +70,6 @@ class IosPrefixMenu extends StatelessWidget {
           if (value != null) await controller.addIosPrefix(value);
           return;
         }
-
-        if (action.type == _PrefixActionType.delete) {
-          final value = await _showDeleteDialog(
-            context,
-            controller.iosPrefixes,
-          );
-          if (value != null) await controller.deleteIosPrefix(value);
-          return;
-        }
       },
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -101,7 +77,13 @@ class IosPrefixMenu extends StatelessWidget {
           children: [
             const Icon(Icons.link),
             const SizedBox(width: 8),
-            Text(controller.selectedIosPrefix, overflow: TextOverflow.ellipsis),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 220),
+              child: Text(
+                controller.selectedIosPrefix,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
             const SizedBox(width: 6),
             const Icon(Icons.arrow_drop_down),
           ],
@@ -143,50 +125,9 @@ class IosPrefixMenu extends StatelessWidget {
       ),
     );
   }
-
-  Future<String?> _showDeleteDialog(
-    BuildContext context,
-    List<String> prefixes,
-  ) async {
-    String? selected = prefixes.first;
-    return showDialog<String>(
-      context: context,
-      builder: (_) => StatefulBuilder(
-        builder: (context, setState) => AlertDialog(
-          title: const Text('Удалить iOS prefix'),
-          content: SizedBox(
-            width: 520,
-            child: DropdownButtonFormField<String>(
-              value: selected,
-              items: prefixes
-                  .map((p) => DropdownMenuItem(value: p, child: Text(p)))
-                  .toList(),
-              onChanged: (v) => setState(() => selected = v),
-              decoration: const InputDecoration(
-                labelText: 'Выбери prefix для удаления',
-              ),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Отмена'),
-            ),
-            FilledButton(
-              onPressed: () {
-                if (prefixes.length <= 1) return;
-                Navigator.pop(context, selected);
-              },
-              child: const Text('Удалить'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }
 
-enum _PrefixActionType { select, add, delete }
+enum _PrefixActionType { select, add }
 
 class _PrefixAction {
   final _PrefixActionType type;
@@ -195,7 +136,6 @@ class _PrefixAction {
   const _PrefixAction._(this.type, this.payload);
 
   const _PrefixAction.add() : this._(_PrefixActionType.add, null);
-  const _PrefixAction.delete() : this._(_PrefixActionType.delete, null);
   const _PrefixAction.select(String prefix)
     : this._(_PrefixActionType.select, prefix);
 }

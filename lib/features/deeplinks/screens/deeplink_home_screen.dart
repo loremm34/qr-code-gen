@@ -71,8 +71,45 @@ class _DeepLinkHomeScreenState extends State<DeepLinkHomeScreen>
               ],
             ),
             actions: [
-              if (_tabController.index == 0)
+              if (_tabController.index == 0) ...[
                 IosPrefixMenu(controller: _controller),
+
+                IconButton(
+                  tooltip: 'Удалить текущий prefix',
+                  onPressed:
+                      (_controller.iosPrefixes.length <= 1 ||
+                          _controller.isLoading)
+                      ? null
+                      : () async {
+                          final ok = await showDialog<bool>(
+                            context: context,
+                            builder: (_) => AlertDialog(
+                              title: const Text('Удалить prefix?'),
+                              content: Text(
+                                'Удалить "${_controller.selectedIosPrefix}"?\n'
+                                'После удаления будет выбран следующий prefix, и у всех iOS диплинков сменится prefix.',
+                              ),
+                              actions: [
+                                TextButton(
+                                  onPressed: () =>
+                                      Navigator.pop(context, false),
+                                  child: const Text('Отмена'),
+                                ),
+                                FilledButton(
+                                  onPressed: () => Navigator.pop(context, true),
+                                  child: const Text('Удалить'),
+                                ),
+                              ],
+                            ),
+                          );
+
+                          if (ok == true) {
+                            await _controller.deleteSelectedIosPrefix();
+                          }
+                        },
+                  icon: const Icon(Icons.delete_outline),
+                ),
+              ],
 
               IconButton(
                 tooltip: 'Добавить',

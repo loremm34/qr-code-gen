@@ -39,48 +39,45 @@ class DeepLinkController extends ChangeNotifier {
       ..addAll(prefixes);
 
     selectedIosPrefix = (selected != null && selected.isNotEmpty)
-        ? selected
-        : (iosPrefixes.isNotEmpty ? iosPrefixes.first : 'example://');
+        ? _normalizePrefix(selected)
+        : (iosPrefixes.isNotEmpty
+              ? _normalizePrefix(iosPrefixes.first)
+              : 'example://');
 
-    // важное: если старые iOS items без iosTail — попробуем восстановить
-    _ensureIosTails();
+    // гарантируем, что у всех iOS есть iosTail (для массовой смены префикса)
+    for (final item in iosItems) {
+      item.iosTail ??= _extractTailGeneric(item.deepLink);
+    }
 
     isLoading = false;
     notifyListeners();
   }
 
-  void _ensureIosTails() {
-    for (final item in iosItems) {
-      item.iosTail ??= _extractTailFromFull(item.deepLink, selectedIosPrefix);
-      // гарантируем что deepLink соответствует выбранному prefix
-      item.deepLink = _composeFull(selectedIosPrefix, item.iosTail!);
-    }
-    // не сохраняем тут автоматически, чтобы не плодить записи на init; сохранится при первом действии
-  }
+  List<DeepLinkItem> itemsFor(bool isIos) => isIos ? iosItems : androidItems;
 
+  // ===================== IMPORTANT CHANGE =====================
+  // iOS: deepLink сохраняем EXACTLY как ввёл пользователь.
+  // iosTail сохраняем, чтобы потом менять prefix массово.
   Future<void> add({
     required bool isIos,
     required String title,
     required String description,
-    required String deepLinkFull, // NEW: вводишь полностью
+    required String deepLinkFull,
   }) async {
     final id = const Uuid().v4();
+    final link = deepLinkFull.trim();
 
     if (isIos) {
-      final tail = _extractTailFromFull(deepLinkFull, selectedIosPrefix);
-      final full = _composeFull(selectedIosPrefix, tail);
-
       iosItems.insert(
         0,
         DeepLinkItem(
           id: id,
           title: title,
           description: description,
-          deepLink: full,
-          iosTail: tail,
+          deepLink: link, // <-- как ввёл
+          iosTail: _extractTailGeneric(link),
         ),
       );
-
       await _repo.save(true, iosItems);
     } else {
       androidItems.insert(
@@ -89,16 +86,17 @@ class DeepLinkController extends ChangeNotifier {
           id: id,
           title: title,
           description: description,
-          deepLink: deepLinkFull, // Android: как ввёл, так и есть
+          deepLink: link,
         ),
       );
-
       await _repo.save(false, androidItems);
     }
 
     notifyListeners();
   }
 
+  // iOS: при ручном редактировании deepLink сохраняем как ввёл,
+  // но обновляем iosTail (чтобы массовая смена префикса работала).
   Future<void> updateDeepLink({
     required bool isIos,
     required String id,
@@ -108,14 +106,14 @@ class DeepLinkController extends ChangeNotifier {
     final idx = list.indexWhere((e) => e.id == id);
     if (idx == -1) return;
 
+    final link = newDeepLink.trim();
+
     if (isIos) {
-      // сохраняем tail и пересобираем full по текущему prefix
-      final tail = _extractTailFromFull(newDeepLink, selectedIosPrefix);
-      list[idx].iosTail = tail;
-      list[idx].deepLink = _composeFull(selectedIosPrefix, tail);
+      list[idx].deepLink = link; // <-- как ввёл
+      list[idx].iosTail = _extractTailGeneric(link);
       await _repo.save(true, iosItems);
     } else {
-      list[idx].deepLink = newDeepLink;
+      list[idx].deepLink = link;
       await _repo.save(false, androidItems);
     }
 
@@ -132,13 +130,13 @@ class DeepLinkController extends ChangeNotifier {
 
   // ===================== iOS prefix actions =====================
 
+  // ТОЛЬКО при смене prefix — переписываем deepLink у всех iOS записей
   Future<void> selectIosPrefix(String prefix) async {
     selectedIosPrefix = _normalizePrefix(prefix);
 
-    // ВОТ ТВОЁ ТРЕБОВАНИЕ: меняем prefix у ВСЕХ iOS диплинков
     for (final item in iosItems) {
-      item.iosTail ??= _extractTailFromFull(item.deepLink, selectedIosPrefix);
-      item.deepLink = _composeFull(selectedIosPrefix, item.iosTail!);
+      item.iosTail ??= _extractTailGeneric(item.deepLink);
+      item.deepLink = _composeWithPrefix(selectedIosPrefix, item.iosTail!);
     }
 
     await _repo.saveSelectedIosPrefix(selectedIosPrefix);
@@ -155,54 +153,48 @@ class DeepLinkController extends ChangeNotifier {
       iosPrefixes.add(p);
       await _repo.saveIosPrefixes(iosPrefixes);
     }
+
+    // можно сразу выбрать
     await selectIosPrefix(p);
   }
 
-  Future<void> deleteIosPrefix(String prefix) async {
+  Future<void> deleteSelectedIosPrefix() async {
     if (iosPrefixes.length <= 1) return;
-    final p = _normalizePrefix(prefix);
 
-    iosPrefixes.remove(p);
+    final current = _normalizePrefix(selectedIosPrefix);
+    iosPrefixes.remove(current);
 
-    if (selectedIosPrefix == p) {
-      selectedIosPrefix = iosPrefixes.first;
-      await _repo.saveSelectedIosPrefix(selectedIosPrefix);
+    // выберем первый оставшийся
+    selectedIosPrefix = _normalizePrefix(iosPrefixes.first);
 
-      for (final item in iosItems) {
-        item.iosTail ??= _extractTailFromFull(item.deepLink, selectedIosPrefix);
-        item.deepLink = _composeFull(selectedIosPrefix, item.iosTail!);
-      }
-      await _repo.save(true, iosItems);
+    for (final item in iosItems) {
+      item.iosTail ??= _extractTailGeneric(item.deepLink);
+      item.deepLink = _composeWithPrefix(selectedIosPrefix, item.iosTail!);
     }
 
     await _repo.saveIosPrefixes(iosPrefixes);
+    await _repo.saveSelectedIosPrefix(selectedIosPrefix);
+    await _repo.save(true, iosItems);
+
     notifyListeners();
   }
 
   // ===================== helpers =====================
 
-  String _composeFull(String prefix, String tail) {
+  // собираем link = prefix + tail (без автосборки при add/edit — только при смене prefix!)
+  String _composeWithPrefix(String prefix, String tail) {
     final p = _normalizePrefix(prefix);
     final t = tail.startsWith('/') ? tail.substring(1) : tail;
     return '$p$t';
   }
 
-  String _extractTailFromFull(String full, String currentPrefix) {
+  // Вытаскиваем tail универсально: "scheme://tail" -> "tail"
+  // если схемы нет — считаем что это уже tail
+  String _extractTailGeneric(String full) {
     final f = full.trim();
-
-    // 1) Если начинается с текущего prefix — просто отрезаем его
-    final p = _normalizePrefix(currentPrefix);
-    if (f.startsWith(p)) {
-      return f.substring(p.length);
-    }
-
-    // 2) Fallback: отрежем "scheme://"
     final idx = f.indexOf('://');
-    if (idx != -1) {
-      return f.substring(idx + 3);
-    }
-
-    return f;
+    if (idx == -1) return f;
+    return f.substring(idx + 3);
   }
 
   String _normalizePrefix(String prefix) {
