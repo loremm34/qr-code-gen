@@ -38,12 +38,12 @@ class _DeepLinkHomeScreenState extends State<DeepLinkHomeScreen>
     );
 
     if (result == null) return;
-    if (result.title.trim().isEmpty) return;
 
     await _controller.add(
       isIos: _isIos,
       title: result.title.trim(),
       description: result.description.trim(),
+      deepLinkFull: result.deepLink.trim(),
     );
   }
 

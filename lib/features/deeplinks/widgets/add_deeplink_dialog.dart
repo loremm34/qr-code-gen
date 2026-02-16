@@ -3,8 +3,13 @@ import 'package:flutter/material.dart';
 class AddDialogResult {
   final String title;
   final String description;
+  final String deepLink; // NEW
 
-  AddDialogResult({required this.title, required this.description});
+  AddDialogResult({
+    required this.title,
+    required this.description,
+    required this.deepLink,
+  });
 }
 
 class AddDeepLinkDialog extends StatefulWidget {
@@ -17,11 +22,13 @@ class AddDeepLinkDialog extends StatefulWidget {
 class _AddDeepLinkDialogState extends State<AddDeepLinkDialog> {
   final _title = TextEditingController();
   final _desc = TextEditingController();
+  final _link = TextEditingController(); // NEW
 
   @override
   void dispose() {
     _title.dispose();
     _desc.dispose();
+    _link.dispose();
     super.dispose();
   }
 
@@ -30,7 +37,7 @@ class _AddDeepLinkDialogState extends State<AddDeepLinkDialog> {
     return AlertDialog(
       title: const Text('Добавить запись'),
       content: SizedBox(
-        width: 480,
+        width: 520,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -42,7 +49,15 @@ class _AddDeepLinkDialogState extends State<AddDeepLinkDialog> {
             TextField(
               controller: _desc,
               decoration: const InputDecoration(labelText: 'Описание'),
-              maxLines: 3,
+              maxLines: 2,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _link,
+              decoration: const InputDecoration(
+                labelText: 'Deep link (полностью)',
+                hintText: 'example://open/123?x=1',
+              ),
             ),
           ],
         ),
@@ -54,9 +69,17 @@ class _AddDeepLinkDialogState extends State<AddDeepLinkDialog> {
         ),
         FilledButton(
           onPressed: () {
+            final title = _title.text.trim();
+            final link = _link.text.trim();
+            if (title.isEmpty || link.isEmpty) return;
+
             Navigator.pop(
               context,
-              AddDialogResult(title: _title.text, description: _desc.text),
+              AddDialogResult(
+                title: title,
+                description: _desc.text.trim(),
+                deepLink: link,
+              ),
             );
           },
           child: const Text('Сохранить'),
