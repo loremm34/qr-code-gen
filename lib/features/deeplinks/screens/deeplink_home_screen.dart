@@ -6,6 +6,8 @@ import '../controller/deeplink_controller.dart';
 import '../widgets/add_deeplink_dialog.dart';
 import '../widgets/deeplink_list.dart';
 import '../widgets/ios_prefix_menu.dart';
+import 'dart:convert';
+import 'package:file_selector/file_selector.dart';
 
 class DeepLinkHomeScreen extends StatefulWidget {
   const DeepLinkHomeScreen({super.key});
@@ -47,6 +49,99 @@ class _DeepLinkHomeScreenState extends State<DeepLinkHomeScreen>
     );
   }
 
+  Future<void> _exportJsonToFile() async {
+    try {
+      final jsonString = _controller.exportToJsonString();
+
+      final location = await getSaveLocation(
+        suggestedName: 'deeplinks_backup.json',
+        acceptedTypeGroups: [
+          const XTypeGroup(
+            label: 'JSON',
+            extensions: ['json'],
+            mimeTypes: ['application/json'],
+          ),
+        ],
+      );
+
+      if (location == null) return;
+
+      final file = XFile.fromData(
+        utf8.encode(jsonString),
+        mimeType: 'application/json',
+        name: 'deeplinks_backup.json',
+      );
+
+      await file.saveTo(location.path);
+
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Экспорт завершён')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Ошибка экспорта: $e')));
+      }
+    }
+  }
+
+  Future<void> _importJsonFromFile() async {
+    try {
+      final file = await openFile(
+        acceptedTypeGroups: [
+          const XTypeGroup(
+            label: 'JSON',
+            extensions: ['json'],
+            mimeTypes: ['application/json'],
+          ),
+        ],
+      );
+
+      if (file == null) return;
+
+      final content = await file.readAsString();
+
+      final replace = await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text('Импорт JSON'),
+          content: const Text(
+            'Заменить текущие данные или добавить к текущим?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Добавить'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Заменить'),
+            ),
+          ],
+        ),
+      );
+
+      if (replace == null) return;
+
+      await _controller.importFromJsonString(content, replace: replace);
+
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Импорт завершён')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Ошибка импорта: $e')));
+      }
+    }
+  }
+
   @override
   void dispose() {
     _tabController.dispose();
@@ -71,6 +166,17 @@ class _DeepLinkHomeScreenState extends State<DeepLinkHomeScreen>
               ],
             ),
             actions: [
+              IconButton(
+                tooltip: 'Импорт JSON',
+                onPressed: _controller.isLoading ? null : _importJsonFromFile,
+                icon: const Icon(Icons.file_open),
+              ),
+              IconButton(
+                tooltip: 'Экспорт JSON',
+                onPressed: _controller.isLoading ? null : _exportJsonToFile,
+                icon: const Icon(Icons.download),
+              ),
+
               if (_tabController.index == 0) ...[
                 IosPrefixMenu(controller: _controller),
 

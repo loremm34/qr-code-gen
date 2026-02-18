@@ -3,6 +3,8 @@ import 'package:uuid/uuid.dart';
 
 import '../../../data/models/deeplink_item.dart';
 import '../../../data/repositories/deeplink_repository.dart';
+import 'dart:convert';
+import '../../../data/models/app_backup.dart';
 
 class DeepLinkController extends ChangeNotifier {
   final DeepLinkRepository _repo;
@@ -44,7 +46,6 @@ class DeepLinkController extends ChangeNotifier {
               ? _normalizePrefix(iosPrefixes.first)
               : 'example://');
 
-    // гарантируем, что у всех iOS есть iosTail (для массовой смены префикса)
     for (final item in iosItems) {
       item.iosTail ??= _extractTailGeneric(item.deepLink);
     }
@@ -53,11 +54,87 @@ class DeepLinkController extends ChangeNotifier {
     notifyListeners();
   }
 
+  String exportToJsonString() {
+    final backup = AppBackup(
+      version: 1,
+      iosPrefixes: List<String>.from(iosPrefixes),
+      iosSelectedPrefix: selectedIosPrefix,
+      iosItems: List<DeepLinkItem>.from(iosItems),
+      androidItems: List<DeepLinkItem>.from(androidItems),
+    );
+
+    return const JsonEncoder.withIndent('  ').convert(backup.toJson());
+  }
+
+  Future<void> importFromJsonString(
+    String jsonString, {
+    bool replace = true,
+  }) async {
+    final decoded = jsonDecode(jsonString);
+    if (decoded is! Map) {
+      throw FormatException('JSON должен быть объектом');
+    }
+
+    final backup = AppBackup.fromJson(decoded.cast<String, dynamic>());
+
+    List<String> normalizeList(List<String> list) {
+      final out = <String>[];
+      for (final p in list) {
+        final n = _normalizePrefix(p);
+        if (n.isNotEmpty && !out.contains(n)) out.add(n);
+      }
+      return out.isEmpty ? <String>['example://'] : out;
+    }
+
+    final importedPrefixes = normalizeList(backup.iosPrefixes);
+    final importedSelected = _normalizePrefix(backup.iosSelectedPrefix);
+    final safeSelected = importedSelected.isNotEmpty
+        ? importedSelected
+        : importedPrefixes.first;
+
+    if (replace) {
+      iosPrefixes
+        ..clear()
+        ..addAll(importedPrefixes);
+      selectedIosPrefix = safeSelected;
+
+      iosItems
+        ..clear()
+        ..addAll(backup.iosItems);
+
+      androidItems
+        ..clear()
+        ..addAll(backup.androidItems);
+    } else {
+      for (final p in importedPrefixes) {
+        if (!iosPrefixes.contains(p)) iosPrefixes.add(p);
+      }
+
+      final existingIosIds = iosItems.map((e) => e.id).toSet();
+      for (final item in backup.iosItems) {
+        if (!existingIosIds.contains(item.id)) iosItems.add(item);
+      }
+
+      final existingAndroidIds = androidItems.map((e) => e.id).toSet();
+      for (final item in backup.androidItems) {
+        if (!existingAndroidIds.contains(item.id)) androidItems.add(item);
+      }
+    }
+
+    for (final item in iosItems) {
+      item.iosTail ??= _extractTailGeneric(item.deepLink);
+    }
+
+    await _repo.saveIosPrefixes(iosPrefixes);
+    await _repo.saveSelectedIosPrefix(selectedIosPrefix);
+    await _repo.save(true, iosItems);
+    await _repo.save(false, androidItems);
+
+    notifyListeners();
+  }
+
   List<DeepLinkItem> itemsFor(bool isIos) => isIos ? iosItems : androidItems;
 
-  // ===================== IMPORTANT CHANGE =====================
-  // iOS: deepLink сохраняем EXACTLY как ввёл пользователь.
-  // iosTail сохраняем, чтобы потом менять prefix массово.
   Future<void> add({
     required bool isIos,
     required String title,
@@ -128,9 +205,6 @@ class DeepLinkController extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ===================== iOS prefix actions =====================
-
-  // ТОЛЬКО при смене prefix — переписываем deepLink у всех iOS записей
   Future<void> selectIosPrefix(String prefix) async {
     selectedIosPrefix = _normalizePrefix(prefix);
 
@@ -164,7 +238,6 @@ class DeepLinkController extends ChangeNotifier {
     final current = _normalizePrefix(selectedIosPrefix);
     iosPrefixes.remove(current);
 
-    // выберем первый оставшийся
     selectedIosPrefix = _normalizePrefix(iosPrefixes.first);
 
     for (final item in iosItems) {
@@ -179,17 +252,12 @@ class DeepLinkController extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ===================== helpers =====================
-
-  // собираем link = prefix + tail (без автосборки при add/edit — только при смене prefix!)
   String _composeWithPrefix(String prefix, String tail) {
     final p = _normalizePrefix(prefix);
     final t = tail.startsWith('/') ? tail.substring(1) : tail;
     return '$p$t';
   }
 
-  // Вытаскиваем tail универсально: "scheme://tail" -> "tail"
-  // если схемы нет — считаем что это уже tail
   String _extractTailGeneric(String full) {
     final f = full.trim();
     final idx = f.indexOf('://');
