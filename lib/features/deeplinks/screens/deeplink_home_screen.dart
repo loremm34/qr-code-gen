@@ -1,13 +1,14 @@
+import 'dart:convert';
+
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
 import '../../../data/repositories/deeplink_repository.dart';
 import '../../../data/storage/local_storage.dart';
 import '../controller/deeplink_controller.dart';
-import '../widgets/add_deeplink_dialog.dart';
-import '../widgets/deeplink_list.dart';
-import '../widgets/ios_prefix_menu.dart';
-import 'dart:convert';
-import 'package:file_selector/file_selector.dart';
+import '../widgets/detail_pane.dart';
+import '../widgets/scheme_menu.dart';
+import '../widgets/tree_panel.dart';
 
 class DeepLinkHomeScreen extends StatefulWidget {
   const DeepLinkHomeScreen({super.key});
@@ -16,102 +17,68 @@ class DeepLinkHomeScreen extends StatefulWidget {
   State<DeepLinkHomeScreen> createState() => _DeepLinkHomeScreenState();
 }
 
-class _DeepLinkHomeScreenState extends State<DeepLinkHomeScreen>
-    with TickerProviderStateMixin {
-  late final TabController _tabController;
+class _DeepLinkHomeScreenState extends State<DeepLinkHomeScreen> {
+  static const _minPanelWidth = 200.0;
+  static const _maxPanelWidth = 520.0;
+
   late final DeepLinkController _controller;
+  double _panelWidth = 300;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-
     _controller = DeepLinkController(DeepLinkRepository(LocalStorage()));
-
     _controller.init();
   }
 
-  bool get _isIos => _tabController.index == 0;
-
-  Future<void> _onAddPressed() async {
-    final result = await showDialog<AddDialogResult>(
-      context: context,
-      builder: (_) => const AddDeepLinkDialog(),
-    );
-
-    if (result == null) return;
-
-    await _controller.add(
-      isIos: _isIos,
-      title: result.title.trim(),
-      description: result.description.trim(),
-      deepLinkFull: result.deepLink.trim(),
-    );
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
   }
 
-  Future<void> _exportJsonToFile() async {
+  Future<void> _exportJson() async {
     try {
       final jsonString = _controller.exportToJsonString();
 
       final location = await getSaveLocation(
-        suggestedName: 'deeplinks_backup.json',
-        acceptedTypeGroups: [
-          const XTypeGroup(
-            label: 'JSON',
-            extensions: ['json'],
-            mimeTypes: ['application/json'],
-          ),
-        ],
+        suggestedName: 'deeplinks.json',
+        acceptedTypeGroups: [_jsonGroup],
       );
-
       if (location == null) return;
 
-      final file = XFile.fromData(
+      await XFile.fromData(
         utf8.encode(jsonString),
         mimeType: 'application/json',
-        name: 'deeplinks_backup.json',
-      );
+        name: 'deeplinks.json',
+      ).saveTo(location.path);
 
-      await file.saveTo(location.path);
-
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Экспорт завершён')));
-      }
+      _toast('Экспорт завершён');
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Ошибка экспорта: $e')));
-      }
+      _toast('Ошибка экспорта: $e');
     }
   }
 
-  Future<void> _importJsonFromFile() async {
+  Future<void> _importJson() async {
     try {
-      final file = await openFile(
-        acceptedTypeGroups: [
-          const XTypeGroup(
-            label: 'JSON',
-            extensions: ['json'],
-            mimeTypes: ['application/json'],
-          ),
-        ],
-      );
-
+      final file = await openFile(acceptedTypeGroups: [_jsonGroup]);
       if (file == null) return;
 
       final content = await file.readAsString();
+      if (!mounted) return;
 
       final replace = await showDialog<bool>(
         context: context,
-        builder: (_) => AlertDialog(
+        builder: (context) => AlertDialog(
           title: const Text('Импорт JSON'),
           content: const Text(
-            'Заменить текущие данные или добавить к текущим?',
+            'Заменить текущее дерево целиком или добавить импорт в корень?',
           ),
           actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Отмена'),
+            ),
             TextButton(
               onPressed: () => Navigator.pop(context, false),
               child: const Text('Добавить'),
@@ -123,31 +90,25 @@ class _DeepLinkHomeScreenState extends State<DeepLinkHomeScreen>
           ],
         ),
       );
-
       if (replace == null) return;
 
       await _controller.importFromJsonString(content, replace: replace);
-
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Импорт завершён')));
-      }
+      _toast('Импорт завершён');
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Ошибка импорта: $e')));
-      }
+      _toast('Ошибка импорта: $e');
     }
   }
 
-  @override
-  void dispose() {
-    _tabController.dispose();
-    _controller.dispose();
-    super.dispose();
+  void _toast(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
+
+  static const _jsonGroup = XTypeGroup(
+    label: 'JSON',
+    extensions: ['json'],
+    uniformTypeIdentifiers: ['public.json'],
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -156,108 +117,64 @@ class _DeepLinkHomeScreenState extends State<DeepLinkHomeScreen>
       builder: (context, _) {
         return Scaffold(
           appBar: AppBar(
-            title: const Text('DeepLink QR Tracker'),
-            bottom: TabBar(
-              controller: _tabController,
-              onTap: (_) => setState(() {}),
-              tabs: const [
-                Tab(text: 'iOS'),
-                Tab(text: 'Android'),
-              ],
-            ),
+            title: const Text('DeepLink QR'),
             actions: [
+              if (!_controller.isLoading) SchemeMenu(controller: _controller),
               IconButton(
                 tooltip: 'Импорт JSON',
-                onPressed: _controller.isLoading ? null : _importJsonFromFile,
-                icon: const Icon(Icons.file_open),
+                onPressed: _controller.isLoading ? null : _importJson,
+                icon: const Icon(Icons.file_upload_outlined),
               ),
               IconButton(
                 tooltip: 'Экспорт JSON',
-                onPressed: _controller.isLoading ? null : _exportJsonToFile,
-                icon: const Icon(Icons.download),
-              ),
-
-              if (_tabController.index == 0) ...[
-                IosPrefixMenu(controller: _controller),
-
-                IconButton(
-                  tooltip: 'Удалить текущий prefix',
-                  onPressed:
-                      (_controller.iosPrefixes.length <= 1 ||
-                          _controller.isLoading)
-                      ? null
-                      : () async {
-                          final ok = await showDialog<bool>(
-                            context: context,
-                            builder: (_) => AlertDialog(
-                              title: const Text('Удалить prefix?'),
-                              content: Text(
-                                'Удалить "${_controller.selectedIosPrefix}"?\n'
-                                'После удаления будет выбран следующий prefix, и у всех iOS диплинков сменится prefix.',
-                              ),
-                              actions: [
-                                TextButton(
-                                  onPressed: () =>
-                                      Navigator.pop(context, false),
-                                  child: const Text('Отмена'),
-                                ),
-                                FilledButton(
-                                  onPressed: () => Navigator.pop(context, true),
-                                  child: const Text('Удалить'),
-                                ),
-                              ],
-                            ),
-                          );
-
-                          if (ok == true) {
-                            await _controller.deleteSelectedIosPrefix();
-                          }
-                        },
-                  icon: const Icon(Icons.delete_outline),
-                ),
-              ],
-
-              IconButton(
-                tooltip: 'Добавить',
-                onPressed: _controller.isLoading ? null : _onAddPressed,
-                icon: const Icon(Icons.add),
+                onPressed: _controller.isLoading ? null : _exportJson,
+                icon: const Icon(Icons.file_download_outlined),
               ),
               const SizedBox(width: 8),
             ],
           ),
           body: _controller.isLoading
               ? const Center(child: CircularProgressIndicator())
-              : TabBarView(
-                  controller: _tabController,
+              : Row(
                   children: [
-                    DeepLinkList(
-                      items: _controller.iosItems,
-                      onEditLink: (id, newLink) => _controller.updateDeepLink(
-                        isIos: true,
-                        id: id,
-                        newDeepLink: newLink,
-                      ),
-                      onDelete: (id) => _controller.delete(isIos: true, id: id),
+                    SizedBox(
+                      width: _panelWidth,
+                      child: TreePanel(controller: _controller),
                     ),
-                    DeepLinkList(
-                      items: _controller.androidItems,
-                      onEditLink: (id, newLink) => _controller.updateDeepLink(
-                        isIos: false,
-                        id: id,
-                        newDeepLink: newLink,
-                      ),
-                      onDelete: (id) =>
-                          _controller.delete(isIos: false, id: id),
+                    _ResizeHandle(
+                      onDrag: (dx) => setState(() {
+                        _panelWidth = (_panelWidth + dx).clamp(
+                          _minPanelWidth,
+                          _maxPanelWidth,
+                        );
+                      }),
                     ),
+                    Expanded(child: DetailPane(controller: _controller)),
                   ],
                 ),
-          floatingActionButton: FloatingActionButton.extended(
-            onPressed: _controller.isLoading ? null : _onAddPressed,
-            icon: const Icon(Icons.add),
-            label: Text(_isIos ? 'Добавить (iOS)' : 'Добавить (Android)'),
-          ),
         );
       },
+    );
+  }
+}
+
+class _ResizeHandle extends StatelessWidget {
+  final void Function(double dx) onDrag;
+
+  const _ResizeHandle({required this.onDrag});
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeColumn,
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onHorizontalDragUpdate: (details) => onDrag(details.delta.dx),
+        child: const SizedBox(
+          width: 8,
+          child: Center(child: VerticalDivider(width: 1)),
+        ),
+      ),
     );
   }
 }

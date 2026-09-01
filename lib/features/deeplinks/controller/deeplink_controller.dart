@@ -1,10 +1,23 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 
-import '../../../data/models/deeplink_item.dart';
-import '../../../data/repositories/deeplink_repository.dart';
-import 'dart:convert';
+import '../../../core/utils/scheme_utils.dart';
 import '../../../data/models/app_backup.dart';
+import '../../../data/models/tree_node.dart';
+import '../../../data/repositories/deeplink_repository.dart';
+
+/// Результат разбора пользовательского ввода диплинка.
+class ParsedLinkInput {
+  final String path;
+
+  /// Схема, которую пользователь вписал в поле вместе с путём.
+  /// null, если он ввёл только хвост.
+  final String? scheme;
+
+  ParsedLinkInput(this.path, this.scheme);
+}
 
 class DeepLinkController extends ChangeNotifier {
   final DeepLinkRepository _repo;
@@ -13,263 +26,362 @@ class DeepLinkController extends ChangeNotifier {
 
   bool isLoading = true;
 
-  final List<DeepLinkItem> iosItems = [];
-  final List<DeepLinkItem> androidItems = [];
+  final List<TreeNode> _nodes = [];
+  final List<String> schemes = [];
 
-  final List<String> iosPrefixes = [];
-  String selectedIosPrefix = 'example://';
+  String selectedScheme = SchemeUtils.defaultScheme;
+  String? selectedId;
+
+  List<TreeNode> get nodes => List.unmodifiable(_nodes);
 
   Future<void> init() async {
     isLoading = true;
     notifyListeners();
 
-    final ios = await _repo.load(true);
-    final android = await _repo.load(false);
+    final state = await _repo.load();
 
-    final prefixes = await _repo.loadIosPrefixes();
-    final selected = await _repo.loadSelectedIosPrefix();
-
-    iosItems
+    _nodes
       ..clear()
-      ..addAll(ios);
-    androidItems
+      ..addAll(state.nodes);
+
+    schemes
       ..clear()
-      ..addAll(android);
+      ..addAll(_normalizeSchemeList(state.schemes));
 
-    iosPrefixes
-      ..clear()
-      ..addAll(prefixes);
-
-    selectedIosPrefix = (selected != null && selected.isNotEmpty)
-        ? _normalizePrefix(selected)
-        : (iosPrefixes.isNotEmpty
-              ? _normalizePrefix(iosPrefixes.first)
-              : 'example://');
-
-    for (final item in iosItems) {
-      item.iosTail ??= _extractTailGeneric(item.deepLink);
-    }
+    final stored = SchemeUtils.normalize(state.selectedScheme);
+    selectedScheme = schemes.contains(stored) ? stored : schemes.first;
 
     isLoading = false;
     notifyListeners();
   }
 
+  // ===================== Чтение дерева =====================
+
+  TreeNode? nodeById(String? id) {
+    if (id == null) return null;
+    for (final n in _nodes) {
+      if (n.id == id) return n;
+    }
+    return null;
+  }
+
+  TreeNode? get selectedNode => nodeById(selectedId);
+
+  /// Дети узла: сначала папки, внутри группы — порядок добавления.
+  List<TreeNode> childrenOf(String? parentId) {
+    final children = _nodes.where((n) => n.parentId == parentId);
+    return [
+      ...children.where((n) => n.isFolder),
+      ...children.where((n) => n.isLink),
+    ];
+  }
+
+  /// Цепочка родителей от корня до узла (сам узел не входит).
+  List<TreeNode> ancestorsOf(String id) {
+    final chain = <TreeNode>[];
+    var parent = nodeById(nodeById(id)?.parentId);
+    while (parent != null) {
+      chain.insert(0, parent);
+      parent = nodeById(parent.parentId);
+    }
+    return chain;
+  }
+
+  /// Полный диплинк с текущей схемой.
+  String fullLink(TreeNode node) =>
+      SchemeUtils.compose(selectedScheme, node.path);
+
+  int countLinksIn(String folderId) {
+    var total = 0;
+    for (final child in childrenOf(folderId)) {
+      total += child.isLink ? 1 : countLinksIn(child.id);
+    }
+    return total;
+  }
+
+  // ===================== Изменение дерева =====================
+
+  Future<String> createFolder({String? parentId, required String title}) async {
+    final node = TreeNode(
+      id: const Uuid().v4(),
+      type: NodeType.folder,
+      parentId: _folderIdFor(parentId),
+      title: title.trim().isEmpty ? 'Новая папка' : title.trim(),
+    );
+    _nodes.add(node);
+    _expandAncestors(node.parentId);
+    selectedId = node.id;
+    await _persistNodes();
+    return node.id;
+  }
+
+  Future<String> createLink({
+    String? parentId,
+    required String title,
+    String description = '',
+    required String rawLink,
+  }) async {
+    final parsed = parseLinkInput(rawLink);
+    if (parsed.scheme != null) await registerScheme(parsed.scheme!);
+
+    final node = TreeNode(
+      id: const Uuid().v4(),
+      type: NodeType.link,
+      parentId: _folderIdFor(parentId),
+      title: title.trim().isEmpty ? 'Без названия' : title.trim(),
+      description: description.trim(),
+      path: parsed.path,
+    );
+    _nodes.add(node);
+    _expandAncestors(node.parentId);
+    selectedId = node.id;
+    await _persistNodes();
+    return node.id;
+  }
+
+  Future<void> updateNode({
+    required String id,
+    String? title,
+    String? description,
+    String? rawLink,
+  }) async {
+    final node = nodeById(id);
+    if (node == null) return;
+
+    if (title != null && title.trim().isNotEmpty) node.title = title.trim();
+    if (description != null) node.description = description.trim();
+
+    if (rawLink != null && node.isLink) {
+      final parsed = parseLinkInput(rawLink);
+      if (parsed.scheme != null) await registerScheme(parsed.scheme!);
+      node.path = parsed.path;
+    }
+
+    await _persistNodes();
+  }
+
+  /// Переносит узел в папку [newParentId] (null — в корень).
+  /// Возвращает false, если перенос невозможен.
+  Future<bool> move(String id, String? newParentId) async {
+    final node = nodeById(id);
+    if (node == null) return false;
+    if (newParentId != null && !canDropInto(id, newParentId)) return false;
+    if (node.parentId == newParentId) return false;
+
+    node.parentId = newParentId;
+    _expandAncestors(newParentId);
+    await _persistNodes();
+    return true;
+  }
+
+  /// Можно ли бросить узел [id] в папку [targetId].
+  bool canDropInto(String id, String targetId) {
+    if (id == targetId) return false;
+    final target = nodeById(targetId);
+    if (target == null || !target.isFolder) return false;
+    return !_isDescendant(targetId, id);
+  }
+
+  Future<void> delete(String id) async {
+    final doomed = <String>{id, ..._descendantIds(id)};
+    _nodes.removeWhere((n) => doomed.contains(n.id));
+    if (doomed.contains(selectedId)) selectedId = null;
+    await _persistNodes();
+  }
+
+  Future<void> toggleExpanded(String id) async {
+    final node = nodeById(id);
+    if (node == null || !node.isFolder) return;
+    node.expanded = !node.expanded;
+    await _persistNodes();
+  }
+
+  void select(String? id) {
+    if (selectedId == id) return;
+    selectedId = id;
+    notifyListeners();
+  }
+
+  // ===================== Схемы =====================
+
+  Future<void> selectScheme(String scheme) async {
+    final s = SchemeUtils.normalize(scheme);
+    if (s.isEmpty || s == selectedScheme) return;
+    if (!schemes.contains(s)) schemes.add(s);
+    selectedScheme = s;
+    await _repo.saveSchemes(schemes);
+    await _repo.saveSelectedScheme(selectedScheme);
+    notifyListeners();
+  }
+
+  /// Добавляет схему в список, не переключаясь на неё.
+  /// Возвращает true, если такой схемы ещё не было.
+  Future<bool> registerScheme(String scheme) async {
+    final s = SchemeUtils.normalize(scheme);
+    if (s.isEmpty || schemes.contains(s)) return false;
+    schemes.add(s);
+    await _repo.saveSchemes(schemes);
+    notifyListeners();
+    return true;
+  }
+
+  Future<void> addScheme(String scheme) async {
+    final s = SchemeUtils.normalize(scheme);
+    if (s.isEmpty) return;
+    if (!schemes.contains(s)) {
+      schemes.add(s);
+      await _repo.saveSchemes(schemes);
+    }
+    await selectScheme(s);
+    notifyListeners();
+  }
+
+  Future<void> renameScheme(String from, String to) async {
+    final oldScheme = SchemeUtils.normalize(from);
+    final newScheme = SchemeUtils.normalize(to);
+    if (newScheme.isEmpty || oldScheme == newScheme) return;
+
+    final index = schemes.indexOf(oldScheme);
+    if (index == -1) return;
+    if (schemes.contains(newScheme)) {
+      schemes.removeAt(index);
+    } else {
+      schemes[index] = newScheme;
+    }
+    if (selectedScheme == oldScheme) selectedScheme = newScheme;
+
+    await _repo.saveSchemes(schemes);
+    await _repo.saveSelectedScheme(selectedScheme);
+    notifyListeners();
+  }
+
+  /// Удаляет схему. Последнюю удалить нельзя.
+  Future<void> deleteScheme(String scheme) async {
+    if (schemes.length <= 1) return;
+    final s = SchemeUtils.normalize(scheme);
+    if (!schemes.remove(s)) return;
+    if (selectedScheme == s) selectedScheme = schemes.first;
+
+    await _repo.saveSchemes(schemes);
+    await _repo.saveSelectedScheme(selectedScheme);
+    notifyListeners();
+  }
+
+  /// Делит ввод на схему и путь. Схема возвращается, только если
+  /// пользователь действительно её написал.
+  ParsedLinkInput parseLinkInput(String raw) =>
+      ParsedLinkInput(SchemeUtils.tailOf(raw), SchemeUtils.schemeOf(raw));
+
+  // ===================== Экспорт / импорт =====================
+
   String exportToJsonString() {
     final backup = AppBackup(
-      version: 1,
-      iosPrefixes: List<String>.from(iosPrefixes),
-      iosSelectedPrefix: selectedIosPrefix,
-      iosItems: List<DeepLinkItem>.from(iosItems),
-      androidItems: List<DeepLinkItem>.from(androidItems),
+      version: AppBackup.currentVersion,
+      schemes: List<String>.from(schemes),
+      selectedScheme: selectedScheme,
+      nodes: List<TreeNode>.from(_nodes),
     );
-
     return const JsonEncoder.withIndent('  ').convert(backup.toJson());
   }
 
+  /// [replace] — затереть текущее дерево, иначе импорт добавится в корень.
   Future<void> importFromJsonString(
     String jsonString, {
     bool replace = true,
   }) async {
     final decoded = jsonDecode(jsonString);
     if (decoded is! Map) {
-      throw FormatException('JSON должен быть объектом');
+      throw const FormatException('Ожидается JSON-объект');
     }
 
     final backup = AppBackup.fromJson(decoded.cast<String, dynamic>());
 
-    List<String> normalizeList(List<String> list) {
-      final out = <String>[];
-      for (final p in list) {
-        final n = _normalizePrefix(p);
-        if (n.isNotEmpty && !out.contains(n)) out.add(n);
-      }
-      return out.isEmpty ? <String>['example://'] : out;
-    }
-
-    final importedPrefixes = normalizeList(backup.iosPrefixes);
-    final importedSelected = _normalizePrefix(backup.iosSelectedPrefix);
-    final safeSelected = importedSelected.isNotEmpty
-        ? importedSelected
-        : importedPrefixes.first;
-
     if (replace) {
-      iosPrefixes
+      _nodes
         ..clear()
-        ..addAll(importedPrefixes);
-      selectedIosPrefix = safeSelected;
-
-      iosItems
+        ..addAll(backup.nodes);
+      schemes
         ..clear()
-        ..addAll(backup.iosItems);
-
-      androidItems
-        ..clear()
-        ..addAll(backup.androidItems);
+        ..addAll(_normalizeSchemeList(backup.schemes));
+      selectedScheme = schemes.contains(backup.selectedScheme)
+          ? backup.selectedScheme
+          : schemes.first;
+      selectedId = null;
     } else {
-      for (final p in importedPrefixes) {
-        if (!iosPrefixes.contains(p)) iosPrefixes.add(p);
+      // Свежие id, чтобы импорт не конфликтовал с уже существующими узлами.
+      final remap = <String, String>{
+        for (final n in backup.nodes) n.id: const Uuid().v4(),
+      };
+      for (final n in backup.nodes) {
+        _nodes.add(
+          n.copyWith(
+            id: remap[n.id],
+            parentId: n.parentId == null ? null : remap[n.parentId],
+          ),
+        );
       }
-
-      final existingIosIds = iosItems.map((e) => e.id).toSet();
-      for (final item in backup.iosItems) {
-        if (!existingIosIds.contains(item.id)) iosItems.add(item);
-      }
-
-      final existingAndroidIds = androidItems.map((e) => e.id).toSet();
-      for (final item in backup.androidItems) {
-        if (!existingAndroidIds.contains(item.id)) androidItems.add(item);
+      for (final s in backup.schemes) {
+        if (!schemes.contains(s)) schemes.add(s);
       }
     }
 
-    for (final item in iosItems) {
-      item.iosTail ??= _extractTailGeneric(item.deepLink);
-    }
-
-    await _repo.saveIosPrefixes(iosPrefixes);
-    await _repo.saveSelectedIosPrefix(selectedIosPrefix);
-    await _repo.save(true, iosItems);
-    await _repo.save(false, androidItems);
-
+    await _repo.saveAll(
+      DeepLinkState(
+        nodes: _nodes,
+        schemes: schemes,
+        selectedScheme: selectedScheme,
+      ),
+    );
     notifyListeners();
   }
 
-  List<DeepLinkItem> itemsFor(bool isIos) => isIos ? iosItems : androidItems;
+  // ===================== Внутреннее =====================
 
-  Future<void> add({
-    required bool isIos,
-    required String title,
-    required String description,
-    required String deepLinkFull,
-  }) async {
-    final id = const Uuid().v4();
-    final link = deepLinkFull.trim();
+  /// Куда класть новый узел: в саму папку либо рядом с диплинком.
+  String? _folderIdFor(String? anchorId) {
+    final anchor = nodeById(anchorId);
+    if (anchor == null) return null;
+    return anchor.isFolder ? anchor.id : anchor.parentId;
+  }
 
-    if (isIos) {
-      iosItems.insert(
-        0,
-        DeepLinkItem(
-          id: id,
-          title: title,
-          description: description,
-          deepLink: link, // <-- как ввёл
-          iosTail: _extractTailGeneric(link),
-        ),
-      );
-      await _repo.save(true, iosItems);
-    } else {
-      androidItems.insert(
-        0,
-        DeepLinkItem(
-          id: id,
-          title: title,
-          description: description,
-          deepLink: link,
-        ),
-      );
-      await _repo.save(false, androidItems);
+  void _expandAncestors(String? parentId) {
+    var current = nodeById(parentId);
+    while (current != null) {
+      current.expanded = true;
+      current = nodeById(current.parentId);
     }
-
-    notifyListeners();
   }
 
-  // iOS: при ручном редактировании deepLink сохраняем как ввёл,
-  // но обновляем iosTail (чтобы массовая смена префикса работала).
-  Future<void> updateDeepLink({
-    required bool isIos,
-    required String id,
-    required String newDeepLink,
-  }) async {
-    final list = isIos ? iosItems : androidItems;
-    final idx = list.indexWhere((e) => e.id == id);
-    if (idx == -1) return;
-
-    final link = newDeepLink.trim();
-
-    if (isIos) {
-      list[idx].deepLink = link; // <-- как ввёл
-      list[idx].iosTail = _extractTailGeneric(link);
-      await _repo.save(true, iosItems);
-    } else {
-      list[idx].deepLink = link;
-      await _repo.save(false, androidItems);
+  Set<String> _descendantIds(String id) {
+    final out = <String>{};
+    for (final child in _nodes.where((n) => n.parentId == id)) {
+      out
+        ..add(child.id)
+        ..addAll(_descendantIds(child.id));
     }
-
-    notifyListeners();
+    return out;
   }
 
-  Future<void> delete({required bool isIos, required String id}) async {
-    final list = isIos ? iosItems : androidItems;
-    list.removeWhere((e) => e.id == id);
-
-    await _repo.save(isIos, list);
-    notifyListeners();
-  }
-
-  Future<void> selectIosPrefix(String prefix) async {
-    selectedIosPrefix = _normalizePrefix(prefix);
-
-    for (final item in iosItems) {
-      item.iosTail ??= _extractTailGeneric(item.deepLink);
-      item.deepLink = _composeWithPrefix(selectedIosPrefix, item.iosTail!);
+  bool _isDescendant(String candidateId, String ancestorId) {
+    var current = nodeById(nodeById(candidateId)?.parentId);
+    while (current != null) {
+      if (current.id == ancestorId) return true;
+      current = nodeById(current.parentId);
     }
-
-    await _repo.saveSelectedIosPrefix(selectedIosPrefix);
-    await _repo.save(true, iosItems);
-
-    notifyListeners();
+    return false;
   }
 
-  Future<void> addIosPrefix(String prefix) async {
-    final p = _normalizePrefix(prefix);
-    if (p.isEmpty) return;
-
-    if (!iosPrefixes.contains(p)) {
-      iosPrefixes.add(p);
-      await _repo.saveIosPrefixes(iosPrefixes);
+  List<String> _normalizeSchemeList(Iterable<String> raw) {
+    final out = <String>[];
+    for (final s in raw) {
+      final n = SchemeUtils.normalize(s);
+      if (n.isNotEmpty && !out.contains(n)) out.add(n);
     }
-
-    // можно сразу выбрать
-    await selectIosPrefix(p);
+    return out.isEmpty ? [SchemeUtils.defaultScheme] : out;
   }
 
-  Future<void> deleteSelectedIosPrefix() async {
-    if (iosPrefixes.length <= 1) return;
-
-    final current = _normalizePrefix(selectedIosPrefix);
-    iosPrefixes.remove(current);
-
-    selectedIosPrefix = _normalizePrefix(iosPrefixes.first);
-
-    for (final item in iosItems) {
-      item.iosTail ??= _extractTailGeneric(item.deepLink);
-      item.deepLink = _composeWithPrefix(selectedIosPrefix, item.iosTail!);
-    }
-
-    await _repo.saveIosPrefixes(iosPrefixes);
-    await _repo.saveSelectedIosPrefix(selectedIosPrefix);
-    await _repo.save(true, iosItems);
-
+  Future<void> _persistNodes() async {
+    await _repo.saveNodes(_nodes);
     notifyListeners();
-  }
-
-  String _composeWithPrefix(String prefix, String tail) {
-    final p = _normalizePrefix(prefix);
-    final t = tail.startsWith('/') ? tail.substring(1) : tail;
-    return '$p$t';
-  }
-
-  String _extractTailGeneric(String full) {
-    final f = full.trim();
-    final idx = f.indexOf('://');
-    if (idx == -1) return f;
-    return f.substring(idx + 3);
-  }
-
-  String _normalizePrefix(String prefix) {
-    final p = prefix.trim();
-    if (p.isEmpty) return '';
-    if (p.endsWith('://')) return p;
-    if (p.endsWith(':')) return '$p//';
-    return '$p://';
   }
 }
