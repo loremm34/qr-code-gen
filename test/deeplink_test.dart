@@ -101,30 +101,62 @@ void main() {
   });
 
   group('Схемы', () {
-    test('переключение схемы меняет все диплинки разом', () async {
+    test('переключение активной схемы двигает только диплинки без своей схемы',
+        () async {
       final c = _controller();
       await c.init();
 
-      final id = await c.createLink(
-        title: 'Ссылка',
-        rawLink: 'example://open/1',
-      );
+      final id = await c.createLink(title: 'Ссылка', rawLink: 'open/1');
       expect(c.fullLink(c.nodeById(id)!), 'example://open/1');
 
       await c.addScheme('myapp');
       expect(c.fullLink(c.nodeById(id)!), 'myapp://open/1');
     });
 
-    test('схема из вставленного линка попадает в список, но не активируется',
-        () async {
+    test(
+        'схема, вписанная вместе со ссылкой, закрепляется за диплинком '
+        'и не зависит от активной', () async {
       final c = _controller();
       await c.init();
 
       final before = c.selectedScheme;
-      await c.createLink(title: 'Ссылка', rawLink: 'other://open/2');
+      final id = await c.createLink(title: 'Ссылка', rawLink: 'other://open/2');
 
+      // Схема попала в список, но активной не стала.
       expect(c.schemes, contains('other://'));
       expect(c.selectedScheme, before);
+
+      // При этом сама ссылка уже использует свою схему, а не активную.
+      expect(c.fullLink(c.nodeById(id)!), 'other://open/2');
+
+      // Переключение активной схемы такую ссылку не трогает.
+      await c.selectScheme('other');
+      await c.addScheme('yetanother');
+      expect(c.fullLink(c.nodeById(id)!), 'other://open/2');
+    });
+
+    test('диплинк можно открепить обратно к активной схеме', () async {
+      final c = _controller();
+      await c.init();
+
+      final id = await c.createLink(title: 'Ссылка', rawLink: 'other://open/2');
+      expect(c.nodeById(id)!.scheme, 'other://');
+
+      await c.followActiveScheme(id);
+      expect(c.nodeById(id)!.scheme, isNull);
+      expect(c.fullLink(c.nodeById(id)!), '${c.selectedScheme}open/2');
+    });
+
+    test('редактирование пути без указания схемы не снимает закрепление',
+        () async {
+      final c = _controller();
+      await c.init();
+
+      final id = await c.createLink(title: 'Ссылка', rawLink: 'other://open/2');
+      await c.updateNode(id: id, rawLink: 'open/3');
+
+      expect(c.nodeById(id)!.scheme, 'other://');
+      expect(c.fullLink(c.nodeById(id)!), 'other://open/3');
     });
 
     test('последнюю схему удалить нельзя', () async {

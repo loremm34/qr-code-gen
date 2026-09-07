@@ -51,6 +51,7 @@ class AppBackup {
             'title': n.title,
             'description': n.description,
             'path': n.path,
+            'scheme': n.scheme,
           },
     ];
   }
@@ -78,6 +79,7 @@ class AppBackup {
           title: (map['title'] as String?) ?? '',
           description: (map['description'] as String?) ?? '',
           path: isFolder ? '' : SchemeUtils.tailOf((map['path'] as String?) ?? ''),
+          scheme: isFolder ? null : _normalizeOrNull(map['scheme']),
           expanded: (map['expanded'] as bool?) ?? true,
         );
         nodes.add(node);
@@ -121,6 +123,9 @@ class AppBackup {
           path: SchemeUtils.tailOf(
             (item['iosTail'] as String?) ?? (item['deepLink'] as String?) ?? '',
           ),
+          // У старых записей схема была явно прописана в deepLink —
+          // закрепляем её, чтобы миграция не смешала все ссылки в одну схему.
+          scheme: SchemeUtils.schemeOf((item['deepLink'] as String?) ?? ''),
         ),
     ];
 
@@ -136,6 +141,12 @@ class AppBackup {
       selectedScheme: _pickSelected(ios['selectedPrefix'], schemes),
       nodes: nodes,
     );
+  }
+
+  static String? _normalizeOrNull(Object? raw) {
+    if (raw is! String) return null;
+    final normalized = SchemeUtils.normalize(raw);
+    return normalized.isEmpty ? null : normalized;
   }
 
   static List<String> _normalizedSchemes(Iterable<String> raw) {

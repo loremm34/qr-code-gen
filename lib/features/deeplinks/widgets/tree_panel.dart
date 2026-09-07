@@ -419,8 +419,8 @@ Future<void> createLinkIn(
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          'Схема ${parsed.scheme} добавлена в список. '
-          'QR строится по активной схеме ${controller.selectedScheme}.',
+          'Схема ${parsed.scheme} добавлена в список и закреплена за '
+          'этим диплинком — он не зависит от активной схемы.',
         ),
       ),
     );
@@ -441,7 +441,7 @@ Future<void> renameNode(
 
   final result = await showLinkDialog(
     context,
-    scheme: controller.selectedScheme,
+    scheme: node.scheme ?? controller.selectedScheme,
     initialTitle: node.title,
     initialDescription: node.description,
     initialPath: node.path,

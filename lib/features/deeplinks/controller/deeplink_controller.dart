@@ -87,9 +87,10 @@ class DeepLinkController extends ChangeNotifier {
     return chain;
   }
 
-  /// Полный диплинк с текущей схемой.
+  /// Полный диплинк. Если за узлом закреплена своя схема — используется она,
+  /// иначе — активная.
   String fullLink(TreeNode node) =>
-      SchemeUtils.compose(selectedScheme, node.path);
+      SchemeUtils.compose(node.scheme ?? selectedScheme, node.path);
 
   int countLinksIn(String folderId) {
     var total = 0;
@@ -131,6 +132,9 @@ class DeepLinkController extends ChangeNotifier {
       title: title.trim().isEmpty ? 'Без названия' : title.trim(),
       description: description.trim(),
       path: parsed.path,
+      // Схему явно вписали вместе со ссылкой — закрепляем её за диплинком,
+      // чтобы он не зависел от того, какая схема сейчас активна.
+      scheme: parsed.scheme,
     );
     _nodes.add(node);
     _expandAncestors(node.parentId);
@@ -153,7 +157,13 @@ class DeepLinkController extends ChangeNotifier {
 
     if (rawLink != null && node.isLink) {
       final parsed = parseLinkInput(rawLink);
-      if (parsed.scheme != null) await registerScheme(parsed.scheme!);
+      if (parsed.scheme != null) {
+        // Схему перевписали явно — переставляем закрепление на новую.
+        await registerScheme(parsed.scheme!);
+        node.scheme = parsed.scheme;
+      }
+      // Если схему не трогали (вписали только хвост), закрепление —
+      // если оно было — остаётся как есть.
       node.path = parsed.path;
     }
 
@@ -186,6 +196,15 @@ class DeepLinkController extends ChangeNotifier {
     final doomed = <String>{id, ..._descendantIds(id)};
     _nodes.removeWhere((n) => doomed.contains(n.id));
     if (doomed.contains(selectedId)) selectedId = null;
+    await _persistNodes();
+  }
+
+  /// Открепляет диплинк от его собственной схемы — он снова начинает
+  /// следовать за активной схемой.
+  Future<void> followActiveScheme(String id) async {
+    final node = nodeById(id);
+    if (node == null || !node.isLink || node.scheme == null) return;
+    node.scheme = null;
     await _persistNodes();
   }
 

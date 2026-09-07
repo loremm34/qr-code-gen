@@ -373,9 +373,21 @@ class _LinkView extends StatelessWidget {
         Center(child: _Qr(data: link, size: 280)),
         const SizedBox(height: 12),
         Center(
-          child: Text(
-            'Активная схема: ${controller.selectedScheme}',
-            style: theme.textTheme.bodySmall,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                node.scheme == null
+                    ? 'Схема: ${controller.selectedScheme} (активная)'
+                    : 'Схема: ${node.scheme} (закреплена за диплинком)',
+                style: theme.textTheme.bodySmall,
+              ),
+              if (node.scheme != null)
+                TextButton(
+                  onPressed: () => controller.followActiveScheme(node.id),
+                  child: const Text('Открепить — следовать активной схеме'),
+                ),
+            ],
           ),
         ),
       ],

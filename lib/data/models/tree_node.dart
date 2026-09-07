@@ -15,6 +15,11 @@ class TreeNode {
   /// Хвост диплинка после `://`. Для папок всегда пустой.
   String path;
 
+  /// Схема, закреплённая за этим диплинком (например `vk://`).
+  /// `null` — диплинк следует за активной схемой из [DeepLinkController].
+  /// Закрепляется автоматически, когда пользователь вписывает схему явно.
+  String? scheme;
+
   /// Раскрыта ли папка в дереве.
   bool expanded;
 
@@ -25,6 +30,7 @@ class TreeNode {
     this.title = '',
     this.description = '',
     this.path = '',
+    this.scheme,
     this.expanded = true,
   });
 
@@ -38,6 +44,7 @@ class TreeNode {
     'title': title,
     'description': description,
     'path': path,
+    'scheme': scheme,
     'expanded': expanded,
   };
 
@@ -50,6 +57,7 @@ class TreeNode {
     title: (json['title'] as String?) ?? '',
     description: (json['description'] as String?) ?? '',
     path: (json['path'] as String?) ?? '',
+    scheme: json['scheme'] as String?,
     expanded: (json['expanded'] as bool?) ?? true,
   );
 
@@ -60,6 +68,7 @@ class TreeNode {
     title: title,
     description: description,
     path: path,
+    scheme: scheme,
     expanded: expanded,
   );
 }
